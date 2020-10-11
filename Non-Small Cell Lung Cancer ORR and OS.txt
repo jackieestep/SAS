@@ -1,0 +1,989 @@
+/*****************************************************************************************************
+Project: Non-Small Cell Lung Cancer Objective Response Rate and Overall Survival 
+         with Adeno Cell Subgroup Analyses
+ 
+Source: This study is based on the Veterans Administration Lung Cancer Trial Data
+research. This can be found in Appendix 1 of J.D. Kalbfleisch and R.L. Prentice (1980): The Statistical Analysis of 
+Failure Time Data. Variables and values have been modified or added in the present study.
+
+Objective: This study involves 173 male patients with inoperable lung cancer. The primary efficacy endpoint 
+is objective response rate (ORR) and the secondary efficacy endpoint is overall survival (OS) of 
+non-small cell lung cancer comparing standard and test chemotherapy treatments. SDTM dataset TR 
+and ADaM datasets ADTR and ADRS are created. Kapalan-Meier product-limit estimates are calculated by
+treatment using PROC LIFETEST. Overall survival summary with 95% CI, percent survival with 95% CI,
+and censor summary are displayed in an OS table. Time-to-event hazard ratio and p-value for overall
+survival comparing treatments are displayed. ORR and 95% CI are modeled using the binomial test
+with Clopper-Pearson confidence intervals. Risk differences between responders are computed
+and the p-value comparing the groups is calculated using the CMH test in PROC FREQ. Finally, a subgroup 
+analysis is performed on adeno cell patients comparing test vs. standard treatments based on age,
+prior therapy, KPS, and study entry time using PROC PHREG. The hazard ratio, p-values, and 
+descriptive statistics are displayed in a forest plot for each subgroup. 
+
+Key Variables
+STUDYID: Study Identifier "001"
+USUBJID: Unique Subject Identifier
+KPSBL: Karnofsky Performance Score at Baseline, range 0-100, 
+       Measures cancer patient's ability to perform tasks
+RD01DURM: Randomization Duration in Months or the time from lung cancer diagnosis to
+          trial entry in months
+AGE: Age in Years 
+APRTR: Analysis Prior Treatment (0=No, 10=Yes)
+ACELL: Cell Type including Squamous, Small, Adeno and Large Cancer Cells 
+ACELLN: Numeric Cell Type 1,2,3,4 represents Squamous, Small, Adeno, and Large, respectively  
+TRTP: Treatment, Character ("Standard" or "Test" Therapy)
+TRTPN: Treatment, Numeric (1=Test, 0=Standard)
+CNSR: 0=event, 1=censored
+
+Name: Jackie Estep
+
+**********************************************************************************************/  
+				/****Create SDTM TR and ADaM data sets ADTR, ADRS, and ADTTE****/          	                 
+/*A time-to-event data set is created where the analysis value (AVAL) is the time to death or
+censoring in days. Baseline Karnofsky Score, duration from diagnosis until trial entry in months,
+age, prior treatment, cell type, and current chemotherapy treatment are included as possible covariates. 
+There are four headers in the data that describe the actual treatment received (TRTP), standard or test, and
+the lung cancer cell type, including squamous, adeno, and large. Negative survival times indicate censoring,
+and CNSR=1 for censored times. Age, KPS, and duration from diagnosis until trial entry separate the 
+population into groups for later analysis and display in a forest plot.*/
+/* AVAL = Time to Death or Censoring (Days), KPSBL = Karnofsky Score, 
+RD01DURM = Time from Diagnosis to Trial Entry (Months), AGE = Age (yrs), APRTR = Prior Treatment (0=No,10=Yes),
+ACELL = Cell Type, TRTP = Treatment (Standard vs. Test), TRTPN = Treatment (N) (1=Test, 0=Standard)*/
+DATA ADTTE (drop=position var subjid);
+    retain TRTP ACELL;
+    length PARAMCD $10  EVNTDESC $ 20;
+    infile datalines col=col;
+    position=col;
+    input var $ @;
+    if position>col then position=1;
+    if anyalpha(var)>0 then input @1 TRTP $ acell $;
+    else input @position AVAL kpsbl rd01durm Age aprtr @@;
+    if age ~=.; *we don't need the observations that read in the headers;
+    if upcase(TRTP)='TEST' then TRTPN = 1; *1 for test therapy, 0 for standard therapy;
+    else TRTPN=0;
+    CNSR= (AVAL<0); *1 for censored time, 0 for "event"/death;
+    AVAL = abs(AVAL);
+    if age<=60 then agegrp=1; else agegrp=2;
+    if kpsbl<=50 then kpsgrp=1; else kpsgrp=2;
+    if rd01durm<=5 then entrygrp=1; else entrygrp=2;
+    if aprtr=10 then prgrp=1; else prgrp=0;/*to help calculate hazard ratio assign group values
+    					   one unit apart*/
+    select(acell);
+   	when ("Squamous") ACELLN=1;
+   	when ("Adeno") acelln=2;
+   	when ("Large") acelln=3;
+   	otherwise;
+    end;
+    STUDYID="001";
+    subjid+1;
+    if SUBJID<10 then USUBJID=STUDYID||"-00"||strip(put(SUBJID,1.));
+    else if SUBJID<100 then USUBJID=STUDYID||"-0"||strip(put(SUBJID,2.));
+    else USUBJID=STUDYID||"-"||strip(put(SUBJID,3.));
+    PARAM="Overall Survival (days)";
+    PARAMCD="OS";
+    RANDDT='15OCT2018'd; /*randomization date assignment*/
+    format randdt yymmdd10.;
+    /* ADT (Date of Death or Censoring)  = AVAL+ RANDDT(Randomization Date) - 1*/
+    ADT = aval+randdt-1;
+    /* Given date of death or censoring, the maximum number of follow-up visits is calculated. 
+    ADT is the date of CT scan for tumor assessments.*/
+    if adt>='15SEP2019'd then visit_max=5;
+    else if adt>='15JUN2019'd then visit_max=4;
+    else if adt>='15MAR2019'd then visit_max=3;
+    else if adt>='15DEC2018'd then visit_max=2;
+    else visit_max=1;
+    /*6 observations are just the treatment and cell type headers so we don't include them in the
+    count*/
+    call symputx('n_obs',(_n_-6));
+    if cnsr=0 then evntdesc='DEATH';   *patient died during the study;
+    else if cnsr=1 and aval=365 then evntdesc='COMPLETED'; *patient was alive at end of study;
+    else if cnsr=1 and aval~=365 then evntdesc='LOST TO FOLLOW-UP';*patient was lost to follow-up;
+    datalines;
+    Standard Squamous
+    72 60  7 69  0   345 70  5 64 10   228 60  3 38  0  126 60  9 63 10
+   118 70 11 65 10    10 20  5 49  0   282 40 10 69 10  110 80 29 68  0
+  -365 50 18 43  0  -100 70  6 70  0   142 60  4 81  0  138 40 58 63 10
+   144 30  4 63  0   -25 80  9 52 10    91 70 11 48 10  130 60  3 61  0   
+    65 60  9 42  0   144 40  2 35  0   154 80  4 63 10   90 40 23 67 10
+   103 60  4 56  0  -123 40  3 55  0   -97 60  5 67  0  153 60 14 63 10
+    99 30  2 65  0   117 80  3 46  0    116 30 4 53 10   51 50 12 69  0
+   282 60  4 68  0   156 80 12 43 10    101 40 2 55 10   98 20 15 42  0
+   139 80  2 64  0    60 30  5 65  0     31 75 3 65  0 -365 70  2 55  0
+   160 25 66 10  0    98 30  4 60  0    251 60  1 67 0  122 80 28 53  0
+    67 60  8 62  0    254 70  1 67 0    307 50  7 72 0  163 50 11 48  0
+    92 40  4 68  0    
+    Standard Adeno
+   108 20 19 61 10    92 70 10 60  0   135 40  6 62  0   317 80  2 38  0
+   132 80  5 50  0   112 50  4 63 10   162 80  5 64  0   103 30  3 43  0
+  -365 80  4 34  0   292 40  4 68  0   110 40 23 67 10    63 50 11 48  0
+   122 60  4 68  0    96 80 12 43 10    21 40  2 55 10   118 20 15 42  0
+   139 80  2 64  0   120 30  5 65  0    81 75  3 65  0    72 70  2 55  0
+   287 60 25 66 10    88 30  4 60  0   251 60  1 67  0   122 80 28 53  0
+   327 60  8 62  0   254 70  1 67  0   117 50  7 72  0    
+   Standard Large
+  177 50 16 66 10   162 80  5 62  0   216 50 15 52  0   223 70  2 47  0
+   78 60 12 63  0    12 40 12 68 10   260 80  5 45  0  -100 80 12 41 10
+  156 70  2 66  0  -182 90  2 62  0   143 90  8 60  0   105 80 11 66  0
+  103 80  5 38  0  -365 70  8 53 10   100 60 13 37 10   110 40 23 67 10
+  122 60  4 68  0   225 80 12 43 10   121 40  2 55 10   118 20 15 42  0
+  139 80  2 64  0   120 30  5 65  0    91 75  3 65  0   152 70  2 55  0
+  287 60 25 66 10    88 30  4 60  0   151 60  1 67  0   122 80 28 53  0
+  127 60  8 62  0   154 70  1 67  0   107 50  7 72  0   203 50 11 48  0
+   92 40  4 68  0    
+   Test Squamous
+ -365 90 12 54 10   312 80  6 60  0   -87 80  3 48  0  -231 50  8 52 10
+  242 50  1 70  0  -365 70  7 50 10   111 70  3 62  0   111 20 21 65 10
+ -365 60  3 58  0  -365 90  2 62  0   333 30  6 64  0   295 20 36 63  0
+ -365 70 13 58  0  -365 90  2 64  0   201 80 28 52 10   231 50  7 35  0
+  130 70 11 63  0    44 60 13 70 10   283 90  2 51  0   115 50 13 40 10
+   Test Adeno
+  124 40  2 60  0   318 40  5 69 10    -83 99  3 57  0   131 80  3 39  0
+  251 60  5 62  0   290 60 22 50 10    252 60  3 43  0  -365 60  3 70  0
+  118 50  5 66  0  -365 70  8 61  0   -365 10  4 81  0   277 40  4 58  0
+  340 70  3 63  0   286 90  3 60  0     84 80  4 62 10    99 50 10 42  0
+  245 40  3 69  0   280 40  4 63  0
+   Test Large
+ -365 60  4 45  0   264 70 15 68 10   319 30  4 39 10    353 60 12 66  0
+  315 30  5 63  0   243 60 11 49 10   340 80 10 64 10    233 75  1 65  0
+  311 60  5 64  0   231 70 18 67 10  -365 80  4 65  0   -365 30  3 37  0
+  325 30  2 69  0  -103 70 22 36 10   221 20  4 71  0    113 30  2 62  0
+  287 60  2 60  0  -365 40 36 44 10   220 30  9 54 10    297 20 11 66  0
+  124 60  8 49  0    99 70  3 72  0   188 80  2 68  0    299 85  4 62  0
+  261 70  2 71  0   225 70  2 70  0  -365 70  1 61  0   -365 50 17 71  0
+ -365 30 87 59 10   129 40  8 67  0
+;
+RUN;
+
+PROC FORMAT;
+    value bestovrl 1='PD' 2='SD' 3='PR' 4='CR' 5='NE' 0='Missing';
+RUN;
+
+                                  /*Tumor Measurements*/
+/*Create SDTM Tumor Results (TR) data following RECIST 1.1 guidelines. RECIST 1.1 allows for five target
+lesions total with maximum two lesions per organ. Here, the rand function is used to assign up to five
+lesions per patient and two non-target lesions. For censored times, tumor shrinkage is present to represent
+positive test treatment. Target lesions are measured by the longest diameter (LD) and non-target lesions are measured qualitatively 
+as present, absent, or unequivocal progression of the tumor. New lesions are also assigned randomly.*/
+
+DATA TR;
+    set ADTTE (keep=trtp trtpn adt cnsr studyid usubjid visit_max acell);
+    call streaminit(3352);
+    /*There are maximum five measurable target lesions per patient and maximum two qualitative
+    non-target lesions.*/
+    length TRORRES $ 15 TRGRPID $12 TRLNKID $5 TRTESTCD $10;
+    DOMAIN='TR';
+    target=rand('Integer',1,5); *maximum five target lesions with minimum one lesion;
+    nontrgt=rand('Integer',0,2);*maximum two non-target lesions;
+    TRORRESn=rand('Integer',5,30); *base lesion longest diameter;
+    do i=1 to target;
+        TRGRPID='Target'; TRLNKID='T0'||put(i,1.); TRTESTCD='LDIAM'; 
+	TRTEST='Longest Diameter'; TRCAT='Measurement'; TRORRESU='mm';
+    /*Five CT scan visits including screening at baseline and four cycles of treatment*/
+	do VISITNUM=1 to visit_max;
+	    if visitnum=1 then VISIT='Screening';
+	    else  VISIT= 'Cycle '||put(visitnum-1,1.);
+	    TRDTC=visitnum;
+	/*Target lesions are created using one-dimensional longest diameter measurements. 
+ 	Values are created based on censoring and treatment status to show some positive test treatment effect.*/
+	    if trtp='Standard' and cnsr=0 then TRORRESn= TRORRESn + TRORRESn*(((rand('Integer',-40,45)/100)*(visitnum>1))+ 
+	        ((rand('Integer',-40,30)/100)*(visitnum>2))+((rand('Integer',-30,15)/100)*(visitnum>3))
+	    	+((rand('Integer',-45,35)/100)*(visitnum>4)));
+            else if trtp='Standard' and cnsr=1 then TRORRESn= TRORRESn + TRORRESn*(((rand('Integer',-40,15)/100)*(visitnum>1))+
+	    	((rand('Integer',-30,15)/100)*(visitnum>2))-((rand('Integer',15,40)/100)*(visitnum>3))
+	    	-((rand('Integer',25,100)/100)*(visitnum>4)));
+	    else if trtp='Test' and cnsr=0 then TRORRESn= TRORRESn + TRORRESn*(((rand('Integer',-10,20)/100)*(visitnum>1))+
+	        ((rand('Integer',-20,20)/100)*(visitnum>2))-((rand('Integer',30,80)/100)*(visitnum>3))
+	   	-((rand('Integer',70,100)/100)*(visitnum>4)));
+	    else if trtp='Test' and cnsr=1 then TRORRESn= TRORRESn - TRORRESn*(((rand('Integer',10,40)/100)*(visitnum>1))-
+	    	((rand('Integer',25,100)/100)*(visitnum>2))-((rand('Integer',40,100)/100)*(visitnum>3))
+	    	-((rand('Integer',70,100)/100)*(visitnum>4))); 
+	    if trorresn<0 then trorresn=0; /*if assignment results in negative tumor measurement it is 
+	    				    corrected to 0 mm*/
+	    /*Allow for Complete Response(CR) in tumor measurements with crid='Y'*/							    
+	    if trtp='Standard' and rand('Integer',1,2)=1 and visitnum>4 then do; TRORRESn=0; crid='Y'; end;
+	    if trtp='Test' and rand('Integer',1,2)=1 and visitnum>2 then do; TRORRESn=0; crid='Y'; end;
+	    TRORRESn=round(TRORRESn,4.);
+	    /*SDTM standards require TRORRES as character.*/
+	    TRORRES=left(put(TRORRESn,4.));
+	    output;
+	end;
+    end;
+	 /*Non-target measurements are assigned qualitatively as present ('PRESENT'), 
+	 absent ('ABSENT'), or having unequivocal progression, 'UNEQUIVOCAL'.*/
+    do j = 1 to nontrgt;
+        TRGRPID='Non-Target'; TRLNKID='NT0'||put(j,1.); TRTESTCD='TUMSTATE'; 
+	TRTEST='Tumor State'; TRCAT='Qualitative'; TRORRESU='';
+	/*tumor flags*/
+	tfl1 = rand('Integer',1,6);
+	tfl2 = rand('Integer',1,3);
+	do visitnum = 1 to visit_max;
+	    if visitnum = 1 then VISIT = 'Screening';
+	    else  VISIT= 'Cycle '||put(visitnum-1,1.);
+	    TRDTC=visitnum;
+	    if ((crid='Y' and visitnum>3) or (visitnum >= 3 and tfl1= 3)) then do; 
+	        trorresn = 0; trorres = 'ABSENT'; 
+		end;
+ 	    else do; 
+ 	 	trorresn = 1; 
+ 	 	if tfl2= 2 then trorres= 'UNEQUIVOCAL';/*unequivocal progression*/
+ 	 	else trorres= 'PRESENT'; end;
+ 	 	output;
+ 	    end;
+	end;
+    /*New Tumor Lesions are created for a subset of patients with equivocal or unequivocal qualitative
+    measurements.*/
+    TRGRPID='New'; TRLNKID='NEW01'; TRTESTCD='TUMSTATE'; 
+    TRTEST='Tumor State'; TRCAT='Qualitative'; TRORRESU='';
+    if (crid~='Y' and tfl2=2 and visit_max>=2) then do;
+        do visitnum= 3 to visit_max;
+	    VISIT= 'Cycle '||put(visitnum-1,1.);
+	    trorresn=1;
+	    if visitnum = 2 then trorres = 'EQUIVOCAL';
+	    else trorres = 'UNEQUIVOCAL';
+	    output;
+	end;
+    end;
+RUN;
+PROC SORT data=TR;
+    by usubjid visitnum descending trgrpid trlnkid;
+RUN;
+/*TR sequence labeling for traceability to ADTR.*/
+DATA TR;
+    set TR;
+    by usubjid visitnum descending trgrpid trlnkid;
+    if first.usubjid then TRSEQ=0;
+    trseq+1;
+RUN;
+PROC SORT data=TR;
+    by usubjid visitnum trlnkid;
+RUN;
+/*Calculate the sum of the diameters (SOD) from baseline and from nadir for target tumors at each visit.
+Nadir is a measure of disease progression from the lowest SOD prior to the current timepoint.*/
+DATA SOD;
+    set TR (where=(trgrpid='Target'));
+    by usubjid visitnum descending trgrpid trlnkid;
+    length paramcd $8 ;
+    retain tl1-tl5 base_t1-base_t5 nadir base_sum;
+    array tl{5} tl1-tl5;
+    array base_t{5} base_t1-base_t5;
+    if first.usubjid then nadir=.; 
+    if first.visitnum then tlseq=1; 
+    tl{tlseq}= input(trorres, 6.);
+    AVAL=tl{tlseq};
+    if visitnum=1 then do;
+        base_t{tlseq}=tl{tlseq};
+    	/*Calculate total sum of target lesions per usubjid per visit.*/
+    	if last.visitnum then base_sum=sum(of base_t1-base_t5);
+    end;
+    BASE=base_t{tlseq};
+    PARAM='Longest Diameter of Target '||substr(trlnkid,3,1)||' (mm)';
+    PARAMCD='LDIAM'; paramid=1;
+    output;
+    tlseq+1;
+    if last.visitnum then do;
+        aval=sum(of tl1-tl5);
+	base=base_sum;
+	/*BASE is SOD at Screening visit*/
+	paramcd='SOD'; param='Sum of Diameter from Baseline (mm)';
+	PARAMTYP='DERIVED'; paramid=2;
+        if visitnum>1 then do;
+	    if base~=. then do; 
+	        CHG=aval-base; 
+		PCHG = round((chg/base)*100,8.2);
+	    end;
+	    /*use criteria flags for target tumors to indicate CR, PR, PD, or SD*/
+	    if aval=0 then CRIT1FL='Y'; /*CR (complete response), absence of all target lesions*/
+	    else if pchg<=-30 then CRIT2FL='Y'; /*PR (partial response),>= 30% decrease in SOD from baseline*/
+	end;
+	output;
+	/*no nadir measurement at screening, since nadir doesn't include the current observation*/
+        if visitnum>1 then do;
+       	    if visitnum=2 then nadir=base_sum;
+       	    chg=aval-nadir;
+            if nadir ~=0 then pchg=round((chg/nadir)*100,8.2); else pchg=0;
+	    if min(nadir,aval)=aval then fl='Y' ;else fl='N';
+	    nadir=min(nadir,aval);/*calculate nadir for subsequent observation*/
+	    if (pchg>20 and chg>5) then CRIT3FL='Y';/*PD (progressive disease),
+					>= 20% increase in SOD from nadir with >= 5mm absolute increase */
+	    /*if ~CRIT1FL and ~CRIT2FL and ~CRIT3FL then SOD shows stable disease, SD*/
+	    crit1fl=''; crit2fl='';
+	    param='Sum of Diameter from Nadir (mm)'; paramcd='SODNDR'; paramtyp='DERIVED'; paramid=3;
+	    output;
+	end;
+    end;
+RUN;
+/*WORK.SOD contains target lesion measurements and WORK.TR contains non-target and new lesion measurements.
+They are sorted and combined vertically in ADTR.*/
+PROC SORT data=SOD;
+    by usubjid visitnum descending trgrpid trlnkid;
+RUN;
+PROC SORT data=TR out=TR_ (where=(trgrpid~='Target'));
+    by usubjid visitnum descending trgrpid trlnkid;
+RUN;
+
+/*ADTR's (Tumor Results Analysis Data) data structure is one record per subject per paramater
+per analysis visit. Summary rows of non-target tumor presence and new tumor presence are created.*/ 
+DATA ADTR; 
+    set SOD TR_;
+    length AVISIT $15 avalc $15 ntl1 $11 ntl2 $11;
+    by usubjid visitnum descending trgrpid trlnkid ;
+    avisit=visit;
+    avisitn=visitnum;
+    retain ntl1-ntl2 ;
+    /*maximum of two non-target lesions in study*/
+    array ntl{2} $ ntl1-ntl2;
+    if trgrpid='Target' then output;
+    /*not all patients have non-target lesions,*/
+    else if trgrpid='Non-Target' then do;
+        if first.trgrpid then ntlseq=1;
+	ntl{ntlseq}=trorres;
+	ntlseq+1;
+	/*non-target lesion summary row*/
+	if last.trgrpid then do;
+	    lnum=ntlseq-1;/*number of non-target lesions*/
+	    if (lnum=1 and ntl1='ABSENT') or (lnum=2 and ntl1='ABSENT' and ntl2='ABSENT') then 
+	    avalc='CR'; /*complete non-target lesion absence*/
+	    else if (ntl1='UNEQUIVOCAL' or ntl2='UNEQUIVOCAL') then avalc='PD'; /*'PD', progressive disease*/
+	    else avalc='Non-CR/Non-PD';/*neither 'CR' nor 'PD'*/
+	    paramcd='NTC'; param='Non-Target Condition'; paramtyp='DERIVED';avisit=visit; avisitn=visitnum;
+	    paramid=4;
+	    output;
+	end;
+    end;
+    /*new lesion summary row: if new lesions are present then avalc='Y'*/
+    else if trgrpid='New' then do;
+        avalc='Y'; paramcd='NLP'; param='Presence of New Lesion'; paramtyp='DERIVED';
+	paramid=4;avisit=visit;avisitn=visitnum;
+	output;
+    end;
+RUN;
+PROC SORT data=ADTR; 
+    by usubjid avisitn ;
+RUN;
+/*ADaM Disease Response Analysis Data using RECIST 1.1 Guidelines
+Target Response:
+	Complete Response (CR)- absence of all target and non-target tumors
+	Partial Response (PR)- >= 30% decrease in SOD from baseline
+	Progressive Disease (PD)- >= 20% increase in SOD from nadir with >= 5mm absolute increase 
+	Stable Disease (SD)-  neither CR, PR, nor PD
+Non-Target Response: 'ABSENT'(complete response and absence of all non-target lesions),'UNEQUIVOCAL'
+	(unequivocal progression of one or more non-target lesions), 'Non-CR/Non-PD'
+Presence of New Lesions: 'Y' if present else ''
+For each visit each usubjid's overall response is stored in an array and used to 
+calculate the Best Overall Response (BOR) at the end of the study. Confirmation of CR or PR is 
+not assumed in this study.*/
+
+DATA ADRS (keep= studyid usubjid trtp trtpn param paramcd paramtyp avisit avisitn avalc adt respfl) ;
+    set ADTR (where=(trparcd in ('SOD','NTC','NLP','SODNDR')) rename=(paramcd=trparcd avalc=avalctr));
+    by usubjid avisitn;
+    length trresp $ 2 ntrresp $ 15 newresp $ 1 avalc $15;
+    if first.avisitn then do; trresp=''; ntrresp=''; newresp='';end;
+    /*Overall Response at a Given Timepoint*/
+    /*Overall response is one row per visit per usubjid and one best overall response per usubjid
+    at end of study.*/
+    retain trresp ntrresp newresp boresp1-boresp4;
+    array boresp{4} $ boresp1-boresp4 ; 	
+    if first.usubjid then do; 
+        bseq=1; 
+	do i=1 to 4;
+	    boresp{i}='';
+	end;
+    end;
+    /*Patients who only have a screening visit due to death or early loss to follow-up are marked 
+    'Missing' for analysis because they do not have on-treatment evaluations.*/
+    if visit_max>1 then do;
+        if avisitn>1 then do;
+	    if trparcd='SOD' then do;
+	        /*trresp is target lesion response at timepoint*/
+		if crit1fl='Y' then trresp='CR'; 
+		else if crit2fl='Y' then trresp='PR'; 
+	    end;
+	    else if trparcd='SODNDR' then do;
+	        if crit3fl='Y' then trresp='PD';  
+	    end;
+	    /*ntrresp is non-target lesion response at timepoint*/
+	    else if trparcd='NTC' then ntrresp=avalctr;
+	    /*newresp is new lesion response at timepoint*/
+            else if trparcd='NLP' then newresp=avalctr;
+	    if trresp not in ('CR','PR','PD') then trresp='SD'; /*(crit1fl~='Y' and crit2fl~='Y' and crit3fl~='Y')*/
+	    if last.avisitn then do;
+	        /*evaluate overall response per timepoint*/
+		if trresp='CR' and newresp~='Y' then do;	
+		    if ntrresp in ('CR','') then avalc='CR';
+		    else if ntrresp='Non-CR/Non-PD' then avalc='PR';
+		end;
+		else if (trresp='PR' and ntrresp in ('Non-CR/Non-PD','') and newresp~='Y') then avalc='PR';
+	    	else if (trresp='SD' and ntrresp in ('Non-CR/Non-PD','') and newresp~='Y') then avalc='SD';
+	    	else if (trresp='PD' or ntrresp='PD' or newresp='Y') then avalc='PD';
+	    	else if (ntrresp='CR' and newresp~='Y') then avalc=trresp;
+	        param='Overall Response';paramcd='OVLRESP';
+	        boresp{bseq}=avalc;
+		bseq+1;
+		output;
+	    end;
+	end;
+    end;
+    if last.usubjid then do;
+        avalc='';
+	if visit_max=1 and trparcd='SOD' then do;
+            avalc='Missing'; iboresp=0; param='Best Overall Response'; paramcd='BORESP'; 
+            paramtyp='DERIVED'; avisit='End of Study'; avisitn=99; respfl=0;
+	    output;
+	end;
+	else do;
+	    /*best overall response for each usubjid*/
+	    do i=1 to 4;/*boresp{1} corresponds to first cycle of treatment*/
+	        select(boresp{i});
+	            when ('CR') iboresp=4;
+		    when ('PR') iboresp=3;
+		    when ('SD') iboresp=2;
+		    when ('PD') iboresp=1;
+		    otherwise iboresp=0;
+	        end;
+	        if iboresp>best then best=iboresp;
+	    end;
+	    avalc= put(best,bestovrl.); param='Best Overall Response';paramtyp='DERIVED';paramcd='BORESP';
+	    avisit='End of Study'; avisitn=99; 
+	    if avalc in ('PR','CR') then respfl=1;/*'Responder' has best overall response of 'CR' or 'PR'.*/
+	    else if avalc ne '' then respfl=0; /*'Non-Responder'*/
+	    output;
+	    best=.;respfl=.;
+	end;
+    end;
+RUN;
+/*SDTM WORK.TR*/
+DATA TR (keep=studyid domain usubjid trtp trtpn trgrpid trlnkid trtestcd trtest trorres trorresu trcat 
+    visitnum visit TRDTC trseq);
+    set TR;
+RUN;
+/*ADaM WORK.ADTR*/
+DATA ADTR(keep=studyid usubjid trtp trtpn param paramtyp paramcd avisit avisitn aval avalc
+    base chg pchg crit1fl crit2fl crit3fl adt trseq);
+    set ADTR;
+RUN;
+                           
+/*Define template to include page numbers in header while bodytitle option is used.*/
+PROC TEMPLATE;
+   define style styles.sample;
+   parent=styles.rtf;
+   style pageno from pageno /font=fonts("strongfont"); 
+   end;
+RUN;
+/*Create rtf output file located in folders/myfolders/sasuser.v94 with Table of Contents.
+Nogtitle was used to move any graph titles to the outside of the plot window. Any procedural
+titles are also suppressed.*/
+ods graphics on / reset=all outputfmt=png;
+options nodate nonumber missing='';
+ods escapechar='^';
+ods rtf bodytitle file='/folders/myfolders/sasuser.v94/LungCancerOS.rtf' style=styles.sample
+    nogtitle contents=yes toc_data image_dpi=300;
+ods noproctitle; ods proclabel=" ";
+PROC SORT data=TR;
+    by usubjid trseq;
+RUN;
+	
+                     
+                 /****Partial listing of SDTM TR data set to conserve space in report.****/
+/*Create label for Table of Contents.*/
+ods proclabel "SDTM TR Listing Subset";
+PROC REPORT data= TR(where=(usubjid in('001-086','001-104','001-150','001-167'))) headline headskip split='*' style(report)=[asis=on] 
+    style(header)=[background=white];
+    columns studyid domain usubjid trtp trtpn trgrpid trlnkid trtestcd trtest trorres trorresu trcat 
+    visitnum visit TRDTC trseq;
+    title j=c"^S={font_face = 'Times' font_weight=bold font_size=14pt font_style=roman}
+    Output 1: Partial SDTM TR Listing";
+RUN;
+title;
+					  /****Overall Survival (OS) Figure and Time-to-Event Table****/
+/*PROC LIFETEST is used to calculate median survival time estimates using the Kaplan-Meier method. 
+Survival Probability is plotted using time in days, and it's stratified by treatment type (standard
+or test chemotherapy).*/
+ods select none;
+ods output CensoredSummary = CenSum
+           Quartiles= Quartiles
+           SurvivalPlot = SurvPlot
+           HomTests = lrank_pval;
+PROC LIFETEST data=ADTTE  method=km outsurv=survive timelist = 0 25 75 150 300 365 
+    reduceout maxtime=365 plots=(s(test atrisk(outside(0.20))));
+    time AVAL*cnsr(1);
+    strata trtp/test=logrank adjust=sidak diff=all;
+RUN;
+
+/*Create macro variable lrpval to store the log-rank p-value for display in sgplot.*/
+DATA log_rank;
+    set lrank_pval;
+    if test='Log-Rank' then call symputx("lrpval", put(ProbChiSq,pvalue5.3) );
+RUN;
+ods select all;
+/*Kaplan-Meier survival plot with number of patients at risk table is created.*/
+ods proclabel 'Kaplan-Meier Product-Limit OS by Treatment';
+title j=c "^S={font_face = 'Times' font_weight=bold font_size=14pt font_style=roman}Output 2:
+ Product-Limit Non-Small Cell Lung Cancer OS Estimates by Chemotherapy Treatment";
+PROC SGPLOT data=SurvPlot (where=(time<=365)) noborder;
+    step x=time y=survival / group=stratum name='survival'  curvelabel curvelabelpos=end
+    lineattrs=(color=black pattern=solid);
+    scatter x=time y=censored / markerattrs=(symbol=plus color=black) name='censored';
+    scatter x=time y=censored / markerattrs=(symbol=plus color=black) group=stratum;
+    xaxistable atrisk / x=tatrisk class=stratum;
+    xaxis max=365;
+    yaxis label= 'Overall Survival Probability';
+    keylegend 'censored' /noborder location=inside position=bottomleft valueattrs=(size=8);
+    inset ("Log-Rank Test"="p&lrpval") / noborder position=topright textattrs=(size=10);
+RUN;
+title;
+/*Format the censor summary data set for display in PROC REPORT. The number and percent of
+deaths and censored patients are displayed by treatment type.*/
+DATA censum (keep= trtp deaths censor);
+    set censum;
+    if trtp="" then trtp="Total";
+    length deaths $20;
+    pctfailed = (failed/total)*100;
+    Deaths = put(failed,3.)||" ("||strip(put(pctfailed,4.1))||"%)";
+    Censor=put(censored,3.)||" ("||strip(put(pctcens,4.1))||"%)";
+    label censor = "Censored" deaths = "Deaths";
+    if trtp = 'Standard' then call symputx('standard',put(total,3.));
+    else if trtp = 'Test' then call symputx('test',put(total,3.));
+    else if trtp='' then call symputx('total', put(total,3.));
+RUN;
+PROC TRANSPOSE data=censum out=censum2;
+    var deaths censor;
+    id trtp;
+RUN;
+/*Format the survival summary quartiles data set to display the number of patients survived and
+95% CI for each quartile and treatment type.*/
+DATA quartiles;
+    set quartiles;
+    where percent<=50;
+    length survrange $24;
+    survrange = put(estimate,5.1)||" ["||strip(put(lowerlimit,5.1))||", "||strip(put(upperlimit,5.1))||"]";
+RUN;
+PROC SORT data=quartiles;
+    by percent;
+RUN;
+PROC TRANSPOSE data=quartiles out=quartiles2;
+    var survrange;
+    id trtp;
+    by percent;
+RUN;
+/*Format the percent survival data set to display the percent of patients survived and 95% CI
+at 0,25,75,150,300,and 365 days for each treatment type.*/
+DATA survive (keep=trtp timelist pctsurv);
+    set survive;
+    length pctsurv $24;
+    if round(survival,0.0001)<=0.01 then pctsurv = '0';
+    else pctsurv = put(survival*100, 5.1)||" % ["||strip(put((sdf_lcl*100),5.1))||", "||strip(put((sdf_ucl*100),5.1))||"]";
+RUN;
+PROC SORT data=survive;
+    by timelist;
+RUN;
+PROC TRANSPOSE data=survive out=survive2 ;
+    var pctsurv;
+    id trtp;
+    by timelist;
+RUN;
+/*Create headers for report.*/
+DATA header_survsum;
+    header = "^S={font_face='Courier New' font_weight=bold} Survival Summary^{newline}(Days[95% CI])";
+RUN;
+DATA header_pctsurv;
+    header="^S={font_face='Courier New' font_weight=bold} Percent Survival^{newline}(%[95% CI])";
+RUN;
+DATA header_censum;
+    header = "^S={font_face='Courier New' font_weight=bold} Censor Summary(n[%])";
+RUN;
+DATA header_trtcomp;
+    header="^S={font_face='Courier New' font_weight=bold} Treatment Comparison";
+RUN;
+DATA pctsurv ;
+    set header_survsum quartiles2;
+    if _N_>1 and percent<=50 then do;
+        if percent = 25 then header = "^{nbspace 10}25th Percentile";
+	else if percent = 50 then header = "^{nbspace 10}50th Percentile";
+    end;
+RUN;
+DATA survsum (drop=timelist);
+    set header_pctsurv survive2 (where=(timelist>=25));
+    if _N_>1 then do;
+        if timelist = 25  then header = "^{nbspace 10}25 Days";
+	else if timelist = 75  then header = "^{nbspace 10}75 Days";
+	else if timelist = 150 then header = "^{nbspace 10}150 Days";
+	else if timelist = 300 then header = "^{nbspace 10}300 Days";
+	else if timelist = 365 then header = "^{nbspace 10}365 Days";
+    end;
+RUN;
+DATA censorsum (drop = _name_ _label_);
+    set header_censum censum2;
+    if _N_>1 then do;
+        if _label_="Deaths" then header = "^{nbspace 10}Deaths";
+	else if _label_="Censored" then header = "^{nbspace 10}Censored";
+    end;
+RUN;
+ods exclude all;
+/*Compare standard and test treatments by calculating the hazard ratio for time to death and p-value of the comparison.*/
+ods output ParameterEstimates=HRatio(keep=probchisq hazardratio hrlowercl hruppercl );
+PROC PHREG data=ADTTE;
+    class trtpn;
+    model aval*cnsr(1)=trtpn/risklimits ties=discrete;
+    hazardratio trtpn;
+RUN;
+DATA HRatio(keep=trtcomp header);
+    set HRatio;
+    trtcomp=put(hazardratio,5.2)||" ["||strip(put(hrlowercl,5.2))||", "||strip(put(hruppercl,5.2))||"]";
+    header="^{nbspace 5}Hazard Ratio (95% CI)";
+    output;
+    if round(probchisq,.0001)<.0001 then trtcomp="<.0001";
+    else if trtcomp=put(probchisq,5.3);
+    header="^{nbspace 5}P-value";
+    output;
+RUN;
+DATA hratio;
+    set header_trtcomp hratio;
+RUN;
+DATA OStable;
+    set pctsurv survsum censorsum hratio;
+RUN;
+ods select all;
+ods proclabel 'Overall Survival Table';
+title j=c "^S={font_face = 'Times' font_weight=bold font_size=14pt font_style=roman} Output 3: Overall Survival Time-to-Event";
+PROC REPORT data=OStable headline headskip split='*' style(report)=[asis=on] 
+    style(header)=[background=white] style(column)={just=c};
+    columns header test standard trtcomp;
+    define header/display '' style(column)=[asis=on];
+    define test/display "Test*(N=&test)";
+    define standard/display "Standard*(N=&standard)";
+    define trtcomp/display "";
+RUN;
+title;
+
+
+                                   /****Objective Response Rate Table****/
+/*Best Overall Response (BOR) count and percent using PROC FREQ*/
+/*neither category has 0 count*/
+ods exclude all;
+PROC FORMAT;
+    invalue $ bestovrlc 'CR'= 5 'PR'=4 'SD'=3 'PD'=2 'Missing'=1 'NE'=0;
+RUN;
+PROC SORT data=ADRS(where=(param='Best Overall Response')) out=ADRSs;
+    by trtp;
+RUN;
+PROC FREQ data=ADRSs;
+    by trtp;
+    table avalc/out=BOR; /*BOR data set*/
+RUN;
+DATA BOR (drop=count percent);
+    set BOR;
+    avalcn=input(avalc,$bestovrlc.);
+    cntpct = put(count,3.0)||" ("||strip(put(percent,5.1))||"%)";/*format BOR statistics*/
+RUN;
+PROC SORT data=BOR;
+    by descending avalcn avalc;
+RUN;
+PROC TRANSPOSE data=BOR out=BOR_(drop=avalcn _name_);
+    var cntpct;
+    id trtp;
+    by descending avalcn avalc;
+RUN;
+DATA header_bor;
+    header = "^S={font_face='Courier New' font_weight=bold} Best Overall Response^{newline}(n(%))";
+RUN;
+/*'Missing' BOR are patients without on-treatment data*/
+DATA bor_t (drop=avalc);
+    set header_bor bor_;
+    if _N_>1 then do;
+        if avalc='CR' then header = "^{nbspace 10}Complete Response (CR)";
+	else if avalc='PR' then header = "^{nbspace 10}Partial Response (PR)";
+	else if avalc='SD' then header = "^{nbspace 10}Stable Disease (SD)";
+	else if avalc='PD' then header = "^{nbspace 10}Progressive Disease (PD)";
+	else if avalc='Missing' then header = "^{nbspace 10}Missing";
+    end;
+RUN;
+/*Objective Response Rate (CR or PR), 95% Binomial Exact Clopper-Pearson CI in PROC FREQ*/
+PROC FREQ data=ADRSs;
+    by trtp;
+    table respfl/binomial(cl=exact) out=ORR;
+    ods output BinomialCLs=ORRcl; /*CIs calculated with respect to non-responders where BOR is not CR nor PR*/
+RUN;
+/*By default, the binominal CIs are calculated with respect to the lowest respfl, which is 0 (non-responder).
+A new data set is created with respfl=1 (responder) as the lowest respfl to obtain binomial exact CIs
+for both treatments of responders.*/
+DATA ADRSs2;
+    set ADRSs;
+    if respfl=0 then respfl=2;
+RUN;
+PROC FREQ data=ADRSs2;
+    by trtp;
+    table respfl/binomial(cl=exact);
+    ods output BinomialCLs=ORRcl2;/*CIs calculated with respect to responders where BOR is CR or PR*/
+RUN;
+DATA ORR;
+    set ORR;
+    cnt=put(count,3.0)||" ("||strip(put(percent,5.1))||"%)";
+RUN;
+DATA ORRclc;
+    set ORRcl(in=a) ORRcl2(in=b);
+    if a then respfl=0;
+    else if b then respfl=1;
+    ci=" ["||strip(put(round(lowercl,.001),z5.3))||", "||strip(put(round(uppercl,.001),z5.3))||"]";
+RUN;
+PROC SORT data=ORR;
+    by trtp;
+RUN;
+PROC SORT data=ORRclc;
+    by trtp;
+RUN;
+DATA ORR (keep=trtp respfl cntpct);
+    merge ORR ORRclc;
+    by trtp;
+    cntpct=cnt||"    "||ci;
+RUN;
+PROC SORT data=ORR;
+    by descending respfl;
+RUN;
+PROC TRANSPOSE data=ORR out=ORR_(drop=_name_);
+    var cntpct;
+    id trtp;
+    by descending respfl;
+RUN;
+DATA header_orr;
+    header = "^S={font_face='Courier New' font_weight=bold} Objective Response Rate^{newline}(n(%)   [95% CI])";
+RUN;
+DATA orr_t (drop=respfl);
+    set header_orr orr_;
+    if _N_>1 then do;
+        if respfl=1 then header = "^{nbspace 10}Responder";
+	else if respfl=0 then header="^{nbspace 10}Non-Responder";
+    end;
+RUN;
+PROC SORT data=ADRS;
+    by descending trtpn descending respfl;
+RUN;
+/*Risk Difference represented as risk difference of responders for test compared to standard treatments.*/
+PROC FREQ data=ADRS (where=(param='Best Overall Response')) order=data;
+    table trtp*respfl/riskdiff;
+    ods output RiskDiffCol1 = riskdif(where=(row='Difference'));
+RUN;
+DATA riskdif (keep=header trtcomp);
+    set riskdif;
+    header="Risk Difference of Responders ^{newline}Test Compared to Standard Trts.";
+    trtcomp=put(risk,z5.3)||" ["||strip(put(lowercl,z5.3))||", "||strip(put(uppercl,z5.3))||"]";
+RUN;
+/*P-value of risk differences shows statistical significance with p<.0001.*/
+PROC FREQ data=ADRS(where=(param='Best Overall Response')) order=data;
+    table trtp*respfl/cmh;
+    ods output CMH=pval(where=(AltHypothesis='Row Mean Scores Differ'));
+RUN;
+DATA pval (keep=header trtcomp);
+    set pval;
+    if round(prob,.0001)<.0001 then trtcomp='<.0001';
+    else trtcomp=put(prob,5.3);
+    header="P-value";
+RUN;
+PROC SQL;
+    create table ORRTable as
+    select * from bor_t
+    outer union corr
+    select * from orr_t;
+QUIT;
+DATA ORRTable;
+    set ORRTable riskdif pval;
+RUN;
+ods select all;
+
+ods proclabel "Objective Response Rate"; /*Create label for Table of Contents.*/
+PROC REPORT data= ORRTable headline headskip split='*' style(report)=[asis=on] 
+    style(header)=[background=white] ;
+    columns header test standard trtcomp;
+    define header/ display '' style(column)=[asis=on];
+    define test/ display "Test Treatment*(N=&test)" center style(column)=[cellwidth=1in];
+    define standard/ display "Standard Treatment*(N=&standard)" center style(column)=[cellwidth=1in];
+    define trtcomp/display "";
+    compute after;
+        line "Risk difference of responders shows statistical significance with p<.0001";
+    endcomp;
+    title j=c "^S={font_face = 'Times' font_weight=bold font_size=14pt font_style=roman}
+    Output 4: Objective Response Rate Table";
+RUN;
+title;
+		/****Adeno Cell Subgroup Analysis -- Cox Regression Analysis by Treatment****/
+/*Macro program 'forestplot' is created to run Cox Regression analyses on stratifying factors
+for adeno cell patients as a subgroup analysis of non-small lung cancer. PROC LIFETEST is used to
+create censored summary and quartile data sets for each subgroup analysis. PROC PHREG calculates 
+the hazard ratio for each subgroup. A subsequent PROC PHREG calculates the p-value comparing each 
+instance of the subgroup. For each treatment subgroup the number of patients, number of events, hazard ratio
+with 95% CI, and p-values are determined.*/
+%macro forestplot (data_in=, class=, var=, _label=, grplabel=, id=, grpid=);
+ods output CensoredSummary = CenSum_&var
+           Quartiles = Quartiles_&var;
+PROC LIFETEST data=&data_in  plots=(s ls lls);
+    time aval*cnsr(1);
+    strata trtpn;
+RUN;
+/*Determine number of patients in test and standard treatments.*/
+PROC TRANSPOSE data=censum_&var (where=(TRTPN in (0,1))) out=censum_&var.2 ;
+    var total;
+    id trtpn;
+RUN;
+DATA censum_&var.2;
+    set censum_&var.2;
+    length _label grplabel $25;
+    _label=&_label;
+    grplabel=&grplabel;
+    patient_ratio=catx('/', _1,_0);
+RUN;
+
+/*Determine number of deaths in each treatment group.*/
+PROC TRANSPOSE data=censum_&var (where=(TRTPN in (0,1))) out=event_&var;
+    var failed;
+    id trtpn;
+RUN;
+DATA event_&var;
+    set event_&var;
+    length _label grplabel $25;
+    _label=&_label;
+    grplabel=&grplabel;
+    event_ratio=catx('/', _1,_0);
+RUN;
+
+/*Calculate hazard ratio.*/
+ods output ParameterEstimates=param_&var;
+PROC PHREG data=&data_in ;
+    class trtpn (ref='0')/param=ref;
+    model aval*cnsr(1) = trtpn/rl;
+RUN;
+DATA param_&var;
+    set param_&var;
+    length _label grplabel $25;
+    _label =&_label;
+    grplabel=&grplabel;
+    hazard_ratio=strip(put(HazardRatio,5.2))||"("||strip(put(HRLowerCl,5.2))||"-"||
+		strip(put(HRUpperCL,5.2))||")";
+RUN;
+/*Calculate p-values for each subgroup.*/
+ods output GlobalTests = pval_&var(where=(test="Likelihood Ratio"));
+PROC PHREG data=ADTTE (where=(acell="Adeno"));
+    class trtpn &class;
+    model aval*cnsr(1) = trtpn &class/risklimits ties=discrete; 
+RUN;
+DATA merge_&var;
+    merge censum_&var.2 event_&var param_&var ;
+    by grplabel;
+    order_id=&id;
+RUN;
+/*Format for clean diplay in forest plot.*/
+DATA pval_&var(keep=_label pvalue order_id);
+    set pval_&var;
+    length _label $25;
+    pvalue= put(ProbChiSq,5.3);
+    _label=&grplabel;
+    order_id=&id;
+RUN;
+DATA final_&var;
+    merge merge_&var pval_&var;
+    by _label;
+    grpid=&grpid;
+    /*If class is missing (like in the Overall Patients category) a 
+    subgroup analysis is not performed. */
+    if find(_label,'Patients','i') then pvalue='';
+RUN;
+%mend;	
+ods exclude all;
+/*ADTTE is subset by adeno cell type. Age, prior treatment status, KPS, and entry time into the study 
+from date of diagnosis are used in these subgroup analyses. Macro variable m_acell specifies adeno cell type.*/
+%let m_acell=Adeno;
+
+%forestplot (data_in=adtte (where=(acell="&m_acell")),class=, var=All,_label="   All",grplabel= "Adeno Cell Patients",id=1,grpid=1);
+%forestplot (data_in=adtte (where=(acell="&m_acell" and prgrp=1)), class=prgrp, var=prior_y, _label="Yes",grplabel= "Prior Treatment",id=2,grpid=2);
+%forestplot (data_in=adtte (where=(acell="&m_acell" and prgrp=0)), class=prgrp, var=prior_n, _label="No",grplabel="Prior Treatment",id=3,grpid=2);
+%forestplot (data_in=adtte (where=(acell="&m_acell" and agegrp=1)),class=agegrp, var=age_low, _label="<= 65 yrs",grplabel="Age",id=4,grpid=3);
+%forestplot (data_in=adtte (where=(acell="&m_acell" and agegrp=2)), class=agegrp, var=age_high, _label="> 65 yrs",grplabel="Age",id=5,grpid=3);
+%forestplot (data_in=adtte (where=(acell="&m_acell" and kpsgrp=1)), class=kpsgrp, var=kps_low, _label="<= 50",grplabel="KPS",id=6,grpid=4);
+%forestplot (data_in=adtte (where=(acell="&m_acell" and kpsgrp=2)), class=kpsgrp, var=kps_high, _label="> 50",grplabel="KPS",id=7,grpid=4);
+%forestplot (data_in=adtte (where=(acell="&m_acell" and entrygrp=1)), class=entrygrp, var=entry_low, _label="<= 5 mos.",grplabel="Study Entry",id=8,grpid=5);
+%forestplot (data_in=adtte (where=(acell="&m_acell" and entrygrp=2)), class=entrygrp, var=entry_high, _label="> 5 mos.",grplabel="Study Entry",id=9,grpid=5);
+ods select all;
+/*Combine data sets vertically to order for output to forest plot.*/
+DATA forest (drop=order_id);
+    set final_all final_prior_y final_prior_n final_age_low final_age_high final_kps_low 
+    final_kps_high final_entry_low final_entry_high;
+RUN;
+PROC SORT data=forest out=forest2 noduprecs;
+    by grpid grplabel;
+RUN;
+/*Create text for hazard ratio plot x-axis to show if test or standard therapy is preferred.*/
+DATA forest_txt;
+    length txt $25;
+    infile datalines dlm=","; 
+    input _ordr txt x1;
+    datalines;
+    15,<- Test,-0.5
+    15,Standard Therapy ->,3
+    ;
+RUN;
+/*Indent subgroup categories beneath headers using "indent" variable with 1.5 weight.*/
+DATA forest3;
+    set forest2;
+    _ordr=_n_;
+    if grplabel='' then indent=0; else indent=1.5;
+    if _n_ in (3,4,5,9,10,11) then ref=_n_; else ref=.;
+RUN;
+DATA forest4;
+    set forest3 forest_txt;
+    by _ordr;
+RUN;
+                    /*Forest Plot Subgroup Analysis for Adeno Cell Lung Cancer*/
+/*The forest plot displays treatment effects across subgroups as hazard ratios and their 
+confidence intervals. The overall treatment effect without subgroup analysis is saved in a macro
+variable, HRAll, representing the overall hazard ratio of 0.46. This makes it easier to see if a 
+subgroup's confidence interval includes the overall hazard ratio indicating it is not
+statistically significant compared to the overall treatment effect on adeno cell lung cancer patients. 
+Hazard ratios smaller than one indicate superiorty of the test drug vs. the standard drug. 
+The number of patients, number of events (deaths), hazard ratio and 95% CI, and
+p-values are displayed. The number of patients and number of events are presented as a ratio
+with test treatment in the numerator and standard treatment in the denominator.
+*/
+DATA hazard_line;
+    set final_all;
+    if _n_=1 then call symput('HRAll', put(hazardratio,5.3));
+RUN;
+/*Format "<=" as unicode for forest plot label in proc sgplot.*/
+PROC FORMAT;
+    value $ labelf  "<= 65 yrs" = "(*ESC*){Unicode '2264'x} 65 yrs"
+	                "<= 50" = "(*ESC*){Unicode '2264'x} 50"
+	            "<= 5 mos." = "(*ESC*){Unicode '2264'x} 5 mos.";
+RUN;
+ods select all;
+ods proclabel 'Forest Plot Subgroup Analysis for Adeno Cell Lung Cancer';
+title "^S={font_face = 'Times' font_weight=bold font_size=14pt font_style=roman} Output 5: Overall Survival Subgroup Analysis for Adeno Cell Lung Cancer"; 
+title2 h=0.9 'Comparing Test vs. Standard Treatments';
+footnote j=l 'A hazard ratio smaller than one favors test treatment.'; 
+footnote2 j=l "The overall hazard ratio of 0.46 is represented by a dashed line. Any subgroup's
+ confidence interval that includes the overall hazard ratio indicates it is not
+ statistically significant compared to the overall treatment effect. "; 
+PROC SGPLOT data=forest4 nocycleattrs nowall noborder noautolegend ;
+    scatter y=_ordr x=hazardratio/xerrorupper=HRupperCL xerrorlower=HRlowerCL
+        markerattrs=(symbol=squarefilled color=blue) errorbarattrs=(color=blue);
+    refline ref /lineattrs=(color=vligb thickness=17) transparency=0.8 ;
+    scatter y=_ordr x=hazard_ratio / markerattrs=(size=0) x2axis;
+    refline 1 / axis=x lineattrs=(color=black) transparency=0.5;
+    refline &HRall /axis=x lineattrs=(pattern=shortdash color=black) transparency=0.5;
+    text x=x1 y=_ordr text=txt / position=center;
+    yaxistable _label /location=inside position=left nolabel 
+    	indentweight=indent valueattrs=(size=10); 
+    yaxistable patient_ratio/ position=left location=inside label='Patient No.' 
+    	labelattrs=(size=10 weight=bold) ;
+    yaxistable event_ratio/location=inside position=left label='Event No.' 
+        labelattrs=(size=10 weight=bold);
+    yaxistable hazard_ratio/location=inside position=right label='HR (95% CI)' 
+        labelattrs=(size=10 weight=bold);
+    yaxistable pvalue / position=right location=inside label='P-Value'
+        labelattrs=(size=10 weight=bold);
+    yaxis reverse display=none  colorbands=odd colorbandsattrs=(color=vligb
+        transparency=0.7);
+	xaxis display=(nolabel) values=(-2 to 5 by 2);
+	x2axis display=(noline noticks novalues) label='Hazard Ratio'
+        labelattrs=(size=10 weight=bold);
+    format _label $labelf.;
+RUN;
+title;
+ods output close;	
+ods graphics off;
+ods rtf close;
