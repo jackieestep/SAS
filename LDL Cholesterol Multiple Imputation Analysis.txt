@@ -1,0 +1,500 @@
+/*********************************************************************************************
+ Project: Baseline Demographics and Change in LDL Cholesterol for Drug vs. Placebo Treatments 
+          Using Multiple Imputation Analysis
+          
+ Purpose: Two hundred patients were assigned to either placebo or drug therapies 
+ designed to reduce LDL cholesterol. LDL was measured over a series of four visits. Baseline
+ age and gender descriptive statistics were calculated. PROC MI is used for multiple imputation
+ analysis, and PROC MIXED is used to evaluate treatment significance at the 0.05 level. A partial
+ listing of the ADaM compliant data set WORK.ADEFFMI is output with drug and placebo treatments
+ displayed on separate tables. Mean LDL cholesterol is plotted for each treatment by visit.
+ 
+Key Variables:
+ADT: Analysis date (numeric) 
+AGE: Age (years), fully observed
+AVAL: LDL cholesterol value (mg/dL), contains missing values 
+AVISIT: Analysis Visit (character) in weeks, values: "Baseline", "Week 4", "Week 8", "Week 12"
+AVISITN: Analysis Visit (numeric) in weeks, values: 0, 4, 8, 12
+IMPUTENM: Imputation Number, values: 1-10
+PARAM: Parameter, "Low-Density Lipoproteins (mg/dL)"
+PARAMCD: Parameter Code, "LDL"
+SEX: M (Male) or F (Female), fully observed
+SEXN: Sex (numeric), 1 (Female) or 2 (Male)
+STUDYID: Study Identifier, "001"
+TRTP: Treatment (character), "DRUG" or "PLACEBO", fully observed
+TRTPN: Treatment (numeric), 0 (placebo) or 1 (drug)
+USUBJID: Unique Subject Identifier
+VISIT: Visit (character), "Visit 1" - "Visit 4"
+VISITNUM: Visit (numeric), 1-4
+**********************************************************************************************/
+PROC FORMAT;
+	value sexf          1="Female"
+		            2="Male";
+	value dtf           1='11APR2018'
+	                    2='09MAY2018'
+	                    3='06JUN2018'
+	                    4='03JUL2018';
+	value avisitf       0="Baseline"
+                            4="Week 4"
+		            8="Week 8"
+	                    12="Week 12";
+	value visitf        1="0"
+	                    2="4"
+	                    3="8"
+	                    4="12";
+	value trtf          1="Drug"
+			    0="Placebo";
+RUN;
+                   /*****Data Set Creation and Multiple Imputation *****/
+/*Create random data set WORK.ADEFF with 200 patients according to ADaM standards. Sex, treatment
+(drug or placebo), and age (normal distribution with mean age of 60) are assigned to each
+patient. Four visits are assigned to each patient where LDL cholesterol is analyzed. The visits
+include baseline, 4, 8, and 12 weeks. For drug treatment, average AVAL is modeled with a normal
+distribution that decreases over subsequent visits to simulate lowering of LDL over time. 
+Placebo treatment shows mild decrease in LDL for Visit 2 to simulate placebo effect but doesn't 
+achieve the lower levels that drug therapy does.*/
+/*This block of code is re-used after transposing WORK.ADMIV, so it is included in the macro 
+visits.*/
+%macro visits;
+	VISIT="Visit "||strip(put(visitnum,1.));
+	AVISITN=input(put(visitnum,visitf.),2.);
+        AVISIT=put(avisitn,avisitf.);
+	ADT=input(put(visitnum,dtf.),DATE9.);
+	format ADT yymmdd10.;
+%mend visits;
+DATA adeff (drop=i subjid);
+	call streaminit(1234);
+	length USUBJID $8 PARAMCD $5 PARAM $33 TRTP $15;
+	do i=1 to 200;
+		SEXN=rand('Integer',1,2);
+		SEX=put(sexn,sexf.);
+		SUBJID+1;
+		STUDYID="001";
+		if SUBJID<10 then USUBJID=STUDYID||"-00"||strip(put(SUBJID,1.));
+		else if SUBJID<100 then USUBJID=STUDYID||"-0"||strip(put(SUBJID,2.));
+		else USUBJID=STUDYID||"-"||strip(put(SUBJID,3.));
+		TRTPN=rand('Integer',0,1);
+		if TRTPN=1 then TRTP="Drug";
+		else if TRTPN=0 then TRTP="Placebo";
+		AGE=round(rand('Normal',60,8));
+		PARAMCD="LDL";
+		PARAM="Low-Density Lipoproteins (mg/dL)";
+			do VISITNUM=1 to 4;
+			    %visits;
+				if trtpn=1 then do;
+					if visitnum=1 then AVAL=round(rand('Normal',160,18));
+					else if visitnum=2 then AVAL=round(rand('Normal',150,18));
+					else AVAL=round(rand('Normal',145,18));
+				end;
+				else do;
+					if visitnum=1 then AVAL=round(rand('Normal',160,19));
+					else AVAL=round(rand('Normal',155,18));
+				end;
+				if visitnum>1 and rand('Integer',0,15)=10 then aval=.;
+	            output;
+	        end;
+	end;
+RUN;
+
+PROC SORT data=adeff;
+	by usubjid visitnum;
+RUN;
+/*The first visit of each patient, Visit 1, is set as the baseline value (BASE). The analysis
+baseline flag (ABLFL) is denoted as 'Y' for baseline visits.*/
+DATA adeff (drop=base_ldl);
+	set adeff;
+	by usubjid visitnum;
+	retain base_ldl;
+	if first.usubjid then do; 
+	    base_ldl=aval;
+	    BASE=base_ldl;
+	    ABLFL='Y';
+	    end;
+	else base=base_ldl;
+RUN;
+
+PROC SORT data=adeff;
+	by usubjid age sexn sex trtp trtpn base paramcd param studyid;
+RUN;
+/*Convert vertical (long) format to horizontal (wide) format to perform FCS multiple imputation in
+PROC MI. WORK.ADEFFH has one record per subject. LDL values for visits 1-4 are represented as
+LDL1-LDL4.*/
+PROC TRANSPOSE data=adeff out=adeffh prefix=LDL;
+	by usubjid age sexn sex trtp trtpn base paramcd param studyid;
+ 	var aval;
+ 	id visitnum;
+RUN; 
+/*The imputed variables ldl2-ldl4 are continuous, the missing data pattern is arbitrary, and
+the covariates are mixed, so FCS regression is the multiple imputation method used.
+The relative efficiency is >0.99 for LDL2-LDL4 with nimpute=10. About 20% of visits 2-4 have
+missing data, so nimpute=10 was chosen to ensure RE>0.99.*/
+PROC MI data=adeffh out=admi seed=1234 nimpute=10 round = . . . . 1 1 1 
+         min= . . . . 100 100 100 max= . . . . 190 190 190 noprint;
+	class sexn trtpn;
+	fcs reg (ldl2 ldl3 ldl4);
+	var age sexn trtpn ldl1-ldl4;
+RUN;
+/*Transpose WORK.ADMI to a vertical data set with one record per analysis value per visit.*/	
+PROC TRANSPOSE data=admi out=admiv (rename=(_imputation_=IMPUTENM)) ;
+	by _imputation_ usubjid age sexn trtpn param paramcd;
+    	var ldl1-ldl4;
+RUN;
+PROC SORT data=admiv;
+	by usubjid _name_;
+RUN;
+/*Add ADaM variables back into transposed data set ADMIV.*/
+DATA admiv;
+	set admiv;
+	by usubjid _name_ ;
+	length TRTP $15;
+	retain base_ldl;
+	if first.usubjid then do; 
+	    base_ldl=aval;
+	    BASE=base_ldl;
+	    ABLFL='Y';
+	    end;
+	else base=base_ldl;
+	STUDYID=substr(usubjid,1,3);
+	VISITNUM=input(compress(_name_,,'kd'),1.);
+ 	TRTP=put(trtpn,trtf.);
+ 	SEX=put(sexn,sexf.);
+ 	%visits;
+RUN;
+PROC SORT data=admiv; 
+	by usubjid avisitn aval;
+RUN;
+PROC SORT data=adeff; 
+	by usubjid avisitn aval;
+RUN;
+/*Merge WORK.ADEFF (original efficacy data set) and WORK.ADMIV (vertical multiple imputation
+data set) to have one complete data set. Derivation type (dtype) is marked as 'MI' if AVAL is 
+from multiple imputation. The change from baseline (CHG) and percent change from baseline (PCHG)
+for each analysis value is calculated according to ADaM standards.*/
+DATA adeffmi (drop= _name_ base_ldl);
+	merge admiv(in=_mi ) adeff(in=_dat );
+	by usubjid avisitn aval;
+	length DTYPE $10;
+    	if _mi;
+    	if not _dat then dtype='MI'; 
+    	CHG=aval-base;
+    	PCHG=round(((aval-base)/base)*100,0.01);
+RUN;
+                          /****DESCRIPTIVE STATISTICS TABLE*****/
+/*Create macro variables, n1 and n2, to count the number of subjects in drug treatment and placebo 
+treatment, respectively.*/
+PROC SQL noprint;
+	select count(distinct(usubjid)) into :n1 from adeff where upcase(trtp)='DRUG' ;
+	select count(distinct(usubjid)) into :n2 from adeff where upcase(trtp)='PLACEBO';
+QUIT;
+/*Calculate age descriptive statistics (N, Mean, Standard Deviation) and output to data set 
+AGE_STAT. Age is fully observed, so WORK.ADEFFH is used.*/
+PROC MEANS data=adeffh noprint;
+	class trtp;
+	var age;
+	where trtp = 'Placebo' OR trtp = 'Drug';
+	output out=age_stat(drop= _type_ _freq_) n=N_ mean=Mean_ std=Std_;
+RUN;
+
+/*Calculate count and percentages for sex descriptive statistics. Sex is fully observed.*/
+PROC FREQ data=adeffh noprint;
+	table trtp*sex/ out=gender_stat outpct;
+RUN;
+
+/*Get p-value comparing mean age based on treatment using t-test since age is normally 
+distributed as defined by assignment in ADEFFH. */
+
+ods select none;
+PROC TTEST data=adeffh;
+	class trtp;
+	var age;
+	ods output ttests=age_pval(where=(Variances='Equal') rename=(probt=pval));
+RUN;
+ods select all;
+/*Get p-value comparing gender based on treatment using Fisher's exact test. */
+PROC FREQ data = adeffh noprint;
+	table sex*trtp/fisher;
+	output out = gender_pval(rename=(XP2_Fish = pval)) fisher;
+RUN;
+/*Create new variables so age statistics are character for output to report. */
+DATA age_stat (drop=N_ mean_ std_);
+	set age_stat;
+	length N Mean Std $15.;
+	N = put(N_, 3.0);
+	Mean = put (mean_,6.2);
+	Std = put(std_,6.2);
+RUN;
+/*Transpose age descriptive statistics so n, mean, and standard deviation are observations.*/
+PROC TRANSPOSE data=age_stat out=age_stat2 ;
+	var n mean std; 
+	id trtp; 
+	where trtp ~=' ';
+RUN;
+
+PROC SORT data=gender_stat;
+	by sex trtp;
+RUN;
+/*Transpose gender statistics using a data step to get data into correct format for report. */
+DATA gender_stat2;
+	set gender_stat;
+	by sex trtp;
+	keep Sex Drug Placebo;
+	length count_percent $ 15;
+	count_percent = put(count, 3.)||' ('||compress(put(pct_row,3.1))||'%)';
+	retain Drug Placebo;
+	array gender {2} $ 15 Drug Placebo;
+	if first.sex then i = 1;
+	gender{i} = count_percent;	
+	i+1;
+	if last.sex;
+RUN;
+/*Define template to include page numbers in header while bodytitle option is used.*/
+PROC TEMPLATE;
+   define style styles.sample;
+   parent=styles.rtf;
+   style pageno from pageno /font=fonts("strongfont"); 
+   end;
+RUN;
+/*Create rtf output file located in folders/myfolders/sasuser.v94 with Table of Contents.
+ Nogtitle was used to move any graph titles to the outside of the plot window. Any procedural
+ titles are also suppressed.*/
+ods graphics on;
+options nodate number missing='';
+ods escapechar='^'; 
+ods rtf bodytitle file= '/folders/myfolders/sasuser.v94/LDL.rtf' style=styles.sample
+         nogtitle contents=yes toc_data;
+ods noproctitle; ods proclabel=" ";
+
+/*Create labels for report.*/
+DATA header_age;
+	set age_pval (keep = pval);
+	label= "^{style[font_face = 'Courier New' font_weight=bold] Age (years)}";
+RUN;
+DATA header_gender;
+	set gender_pval (keep = pval);
+	label= "^S={font_face = 'Courier New' font_weight=bold} Gender ";
+RUN;
+
+/*Concatenate label header with age statistics. */
+DATA age;
+	set header_age age_stat2;
+	if _N_>1 then do;
+ 		if  _NAME_= 'N' then label="^{nbspace 5}N";
+		else if _NAME_ = 'Mean' then label="^{nbspace 5}Mean";
+		else if _NAME_ = 'Std' then label="^{nbspace 5}Std";
+		else label='';
+		end;
+	keep label drug placebo pval; 
+RUN;
+
+/*Concatenate label header with gender statistics. */
+DATA gender;
+	set header_gender gender_stat2;
+	if _N_>1 then label="^{nbspace 5}"||sex;
+	keep label Drug Placebo pval; 
+RUN;
+
+/*Concatenate age and gender statistics for final dataset. */
+DATA final;
+	set age gender;
+RUN;
+/*Remove leading and trailing blanks from macro variables, n1 and n2. */
+%let n1 = &n1;
+%let n2 = &n2;
+/*Create label for Table of Contents.*/
+ods proclabel "Demographic Comparisons Table";
+/*Create a report comparing the demographics between drug and placebo treatments.*/
+PROC REPORT data= final headline headskip split='*' style(report)=[asis=on] 
+                        style(header)=[background=white] ;
+	columns label Drug Placebo pval;
+	define label/ display '' style(column)=[asis=on];
+	define drug/ display "Drug*(N=&n1)" center style(column)=[cellwidth=1in];
+	define placebo/ display "Placebo*(N=&n2)" center style(column)=[cellwidth=1in];
+	define pval/display "*P-value" format=5.3 center;
+	compute after;
+		line "P-Value Calculations";
+		line "Age: T-test ";
+		line "Gender: Fisher's exact";
+		line "There are no significant differences in age and gender between treatment groups.";
+	endcomp;
+	title j=c"^S={font_face = 'Times' font_weight=bold font_size=14pt }
+	Output 1: Demographic Comparisons, LDL Cholesterol Drug vs. Placebo";
+RUN;
+title;
+
+                   /*****COMPARING TREATMENTS AT EACH VISIT*****/
+PROC SORT data=adeffmi; 
+	by imputenm usubjid avisitn; 
+RUN;
+/*PROC MIXED is used since it allows for repeated measures analysis when missing values are
+present. Here, the missing values are MCAR. An unstructured matrix type is used to estimate the
+intercept-slope covariance and use them in the solution. The analysis is performed by imputation
+number. The baseline visit, treatment, analysis visit number, and possible treatment-analysis 
+visit interaction is modeled. The difference of LS-Means is stored in the data set WORK.DIFFS.*/
+ods select none;
+
+PROC MIXED data=adeffmi(WHERE=(avisitn>0));
+	by imputenm;
+	class usubjid trtp avisitn;
+	model aval = trtp|avisitn base;
+	repeated avisitn / subject=usubjid type=un; 
+	lsmeans trtp|avisitn /cl diff;
+	ods output diffs=diffs;
+	title;
+RUN;
+PROC SORT data=diffs;
+	by avisitn imputenm;
+RUN;
+/*PROC MIANALYZE analyzes the results of PROC MIXED and compares the treatments at each
+analysis visit. "Probt" tells the significant difference between treatments, if any, for each 
+time. */
+
+PROC MIANALYZE data=diffs ;
+	by avisitn;
+	modeleffects estimate;
+	stderr stderr;
+	ods output parameterestimates=param_mix;
+RUN;
+
+/*Create macro variable for p-value to insert into the report.*/
+DATA _NULL_;
+	set param_mix;
+	if avisitn=12 then call symput("p4",put(probt,5.4));  
+	else if avisitn=8 then call symput("p3",put(probt,5.4));
+	else if avisitn=4 then call symput("p2",put(probt,5.4));
+RUN;
+/*Create a partial listing of WORK.ADEFFMI to conserve table space. Only the first imputation,
+IMPUTENM=1 is displayed to condense the table. USUBJID1 and TRTPN1 are created, since the 
+data will be ordered by the subject id and treatment(numeric). PROC REPORT only prints the 
+first occurrence of an order variable, and CDISC standards require the entire column to be
+populated. USUBJID1 and TRTPN1 are used as order variables, and USUBJID and TRTPN are used
+to populate the columns. */
+DATA adeff_sample;
+	set adeffmi;
+ 	where imputenm=1  and usubjid in ('001-001','001-026','001-044','001-068','001-073','001-077','001-102','001-111','001-145','001-107',
+ 	'001-093','001-179');
+    	usubjid1=usubjid;
+    	trtpn1=trtpn;
+RUN;
+
+ods select all;
+ods proclabel "Partial WORK.ADEFFMI Listing/Trt Significance";
+/*A partial sample of the ADaM data set is output to .rtf along with post-baseline p-values. 
+Any patients that have a 12 week post-baseline LDL measurement greater than 160 mg/dL 
+are flagged in red. */
+PROC REPORT data = adeff_sample headline headskip split='*' style(report) =[asis=on] style(column)={just=c}
+    	style(header)=[background=white];
+	columns trtpn1 studyid usubjid usubjid1 trtp trtpn age sex sexn  param paramcd visitnum visit avisit
+	        avisitn adt imputenm dtype base ablfl aval chg pchg  ;
+	define trtpn1/ order noprint;
+        define usubjid1/ order noprint;
+    	define usubjid/id;
+    	define visitnum/order;
+	define imputenm/'IMPUTENM';
+    	title j=c "^S={font_face = 'Times' font_weight=bold font_size=14pt}
+    	Output 2: Partial WORK.ADEFFMI Listings and Treatment Significance";
+    	*Final high LDL cholesterol values (>160) are flagged in red. ;
+	compute aval;
+     	if visitnum=4 and aval.sum >160 then call define(_col_,"style","style={foreground=red}");
+    	endcomp;
+  	compute before _page_;
+		line 'Partial WORK.ADEFFMI Data Set: ' trtpn1 trtf. ;
+	endcomp;
+	break after trtpn1/ page;
+RUN;
+ods text ='';
+ods text= "^S={leftmargin=1in} PROC MIXED is used to assess treatment significance at the 0.05 level.";
+ods text= "^S={leftmargin=2in}At 4 weeks post-baseline, p-val is &p2";
+ods text= "^S={leftmargin=2in}At 8 weeks post-baseline, p-val is &p3";
+ods text= "^S={leftmargin=2in}At 12 weeks post-baseline, p-val is &p4 **";
+ods text= "^S={leftmargin=1in}**At 12 weeks, there is a significant difference between treatments.";
+ods text="^S={leftmargin=1in}There were 10 imputations performed for each LDL measurement, but only one imputation
+ is shown for each usubjid here.";
+title;
+
+               /*****Plot of Mean LDL Comparing Treatment Groups by Visit.*****/
+
+PROC SORT data=adeffmi;
+	by avisitn imputenm;
+RUN;
+/*The mean, standard errors, and upper & lower confidence limits are calculated for each
+treatment with PROC MEANS and analyzed with PROC MIANALYZE. The output data is saved in 
+WORK.PARAM_MI.*/
+PROC MEANS data=adeffmi noprint;
+	by avisitn imputenm;
+	class trtpn;
+	var aval;
+	output out=ldlmeans(where=(trtpn in (1,0))) mean=Mean lclm=LCLM uclm=UCLM stderr=Stderr;
+RUN;
+PROC SORT data=ldlmeans; 
+	by trtpn avisitn;
+RUN;
+
+ods select none;
+PROC MIANALYZE DATA=ldlmeans (where=(avisitn>0));
+	by trtpn avisitn;
+	modeleffects mean;
+	stderr stderr;
+	ods output parameterestimates=param_mi;
+RUN;
+ods select all;
+/*LDLMEANS and PARAM_MI are combined vertically. LDLMEANS has Visit 1 (baseline),
+ which was not imputed since it is fully observed. PARAM_MI contains Visits 2-4.*/
+DATA param_mi;
+	set ldlmeans (where=(imputenm=1 and avisitn=0 and trtpn=0) rename=(mean=estimate lclm=lclmean
+	              uclm=uclmean))
+	 ldlmeans (where=(imputenm=1 and avisitn=0 and trtpn=1) rename=(mean=estimate lclm=lclmean
+	              uclm=uclmean))
+	 param_mi;
+RUN;
+
+/*Macro ldl_mean formats and sorts the results of PROC MIANALYZE for both treatments and creates
+graphldl_0 for placebo and graphldl_1 for drug in the WORK library. */
+%macro ldl_mean(trt=);
+	DATA graphldl_&trt ;
+		set param_mi (where=(trtpn=&trt));
+    	mean_&trt=estimate;
+		mean_stderr_&trt = strip(put(estimate,6.2))||'('||strip(put(stderr,8.2))||')';
+		lclm_&trt=lclmean;
+		uclm_&trt=uclmean;
+	RUN;
+	PROC SORT data=graphldl_&trt;
+		by avisitn;
+	RUN;
+%mend ldl_mean;
+%ldl_mean(trt=0);
+%ldl_mean(trt=1);
+/*GRAPHLDL_0 and GRAPHLDL_1 are merged by numeric analysis visit to create data set WORK.GRAPHLDL,
+which is used to create the mean LDL plot. */
+DATA graphldl;
+	merge graphldl_0 graphldl_1;
+	by avisitn;
+RUN;
+
+/*Create a plot of mean LDL cholesterol for treatment and placebo groups by visit. */
+ods proclabel "Mean LDL Plot";
+title j=c "^S={font_face ='Times' font_weight=bold font_size=14pt} 
+Output 3: Mean LDL Cholesterol by Visit and Treatment";
+PROC SGPLOT data=graphldl;
+	scatter x=avisitn y=mean_0/ yerrorlower=lclm_0 yerrorupper=uclm_0 
+		markerattrs=(color=blue symbol=circlefilled size=11)
+    	errorbarattrs=(color=blue thickness=1) discreteoffset=-.15;
+    	scatter x=avisitn y=mean_1/ yerrorlower=lclm_1 yerrorupper=uclm_1 
+        markerattrs=(color=red symbol=squarefilled size=11)
+        errorbarattrs=(color=red thickness=1) ;
+	series  x=avisitn y=mean_0/ lineattrs=(pattern=2 color=blue thickness=2) 
+        datalabel=mean_0 datalabelpos=bottomleft datalabelattrs=(color=blue)
+        name='Placebo' legendlabel='Placebo' discreteoffset=-.15;
+    	series  x=avisitn y=mean_1/ lineattrs=(color=red thickness=2)
+        datalabel=mean_1 datalabelpos= topright datalabelattrs=(color=red)
+        name='Drug' legendlabel='Drug' ;
+	yaxis label='Mean with 95% CL' grid;
+	xaxis type=discrete label= 'Visit';
+	keylegend 'Placebo' / location=inside position=topright ;
+	keylegend 'Drug'/  location=inside position=top;
+    	xaxistable mean_stderr_1 /x=avisitn location=outside label='DRUG:';
+    	xaxistable mean_stderr_0/x=avisitn location=outside label='PLACEBO:';
+    	footnote '*Mean(Standard Error)*';
+    	format avisitn avisitf.;
+run;
+ods graphics off;
+ods rtf close;
